@@ -166,8 +166,11 @@ var FudgeCore;
 var FudgeCore;
 (function (FudgeCore) {
     /**
-     * Base class implementing mutability of instances of subclasses using [[Mutator]]-objects
-     * thus providing and using interfaces created at runtime
+     * Base class for all types being mutable using [[Mutator]]-objects, thus providing and using interfaces created at runtime.
+     * Mutables provide a [[Mutator]] that is build by collecting all object-properties that are either of a primitive type or again Mutable.
+     * Subclasses can either reduce the standard [[Mutator]] built by this base class by deleting properties or implement an individual getMutator-method.
+     * The provided properties of the [[Mutator]] must match public properties or getters/setters of the object.
+     * Otherwise, they will be ignored if not handled by an override of the mutate-method in the subclass and throw errors in an automatically generated user-interface for the object.
      */
     class Mutable extends EventTarget {
         /**
@@ -301,8 +304,8 @@ var FudgeCore;
             this.totalTime = 0;
             this.labels = {};
             this.stepsPerSecond = 10;
-            this.framesPerSecond = 60;
             this.events = {};
+            this.framesPerSecond = 60;
             // processed eventlist and animation strucutres for playback.
             this.eventsProcessed = new Map();
             this.animationStructuresProcessed = new Map();
@@ -879,10 +882,10 @@ var FudgeCore;
          * @returns the value of the sequence at the given time. 0 if there are no keys.
          */
         evaluate(_time) {
+            if (this.keys.length == 0)
+                return 0; //TODO: shouldn't return 0 but something indicating no change, like null. probably needs to be changed in Node as well to ignore non-numeric values in the applyAnimation function
             if (this.keys.length == 1 || this.keys[0].Time >= _time)
                 return this.keys[0].Value;
-            if (this.keys.length == 0)
-                return 0;
             for (let i = 0; i < this.keys.length - 1; i++) {
                 if (this.keys[i].Time <= _time && this.keys[i + 1].Time > _time) {
                     return this.keys[i].functionOut.evaluate(_time);
@@ -1449,7 +1452,7 @@ var FudgeCore;
          * Return a reference to the offscreen-canvas
          */
         static getCanvas() {
-            return RenderOperator.crc3.canvas;
+            return RenderOperator.crc3.canvas; // TODO: enable OffscreenCanvas
         }
         /**
          * Return a reference to the rendering context
@@ -1935,6 +1938,20 @@ var FudgeCore;
             let mutator = this.animation.getMutated(_time, this.calculateDirection(_time), this.playback);
             this.getContainer().applyAnimation(mutator);
         }
+        /**
+         * Returns the current time of the animation, modulated for animation length.
+         */
+        getCurrentTime() {
+            return this.localTime.get() % this.animation.totalTime;
+        }
+        /**
+         * Forces an update of the animation from outside. Used in the ViewAnimation. Shouldn't be used during the game.
+         * @param _time the (unscaled) time to update the animation with.
+         * @returns a Tupel containing the Mutator for Animation and the playmode corrected time.
+         */
+        updateAnimation(_time) {
+            return this.updateAnimationLoop(null, _time);
+        }
         //#region transfer
         serialize() {
             let s = super.serialize();
@@ -1961,11 +1978,13 @@ var FudgeCore;
         /**
          * Updates the Animation.
          * Gets called every time the Loop fires the LOOP_FRAME Event.
+         * Uses the built-in time unless a different time is specified.
+         * May also be called from updateAnimation().
          */
-        updateAnimationLoop() {
+        updateAnimationLoop(_e, _time) {
             if (this.animation.totalTime == 0)
-                return;
-            let time = this.localTime.get();
+                return [null, 0];
+            let time = _time || this.localTime.get();
             if (this.playback == ANIMATION_PLAYBACK.FRAMEBASED) {
                 time = this.lastTime + (1000 / this.animation.fps);
             }
@@ -1979,7 +1998,9 @@ var FudgeCore;
                 if (this.getContainer()) {
                     this.getContainer().applyAnimation(mutator);
                 }
+                return [mutator, time];
             }
+            return [null, time];
         }
         /**
          * Fires all custom events the Animation should have fired between the last frame and the current frame.
@@ -2124,7 +2145,7 @@ var FudgeCore;
     class ComponentCamera extends FudgeCore.Component {
         constructor() {
             super(...arguments);
-            // TODO: a ComponentPivot might be interesting to ease behaviour scripting
+            this.pivot = FudgeCore.Matrix4x4.IDENTITY;
             //private orthographic: boolean = false; // Determines whether the image will be rendered with perspective or orthographic projection.
             this.projection = PROJECTION.CENTRAL;
             this.transform = new FudgeCore.Matrix4x4; // The matrix to multiply each scene objects transformation by, to determine where it will be drawn.
@@ -2151,24 +2172,29 @@ var FudgeCore;
         getFieldOfView() {
             return this.fieldOfView;
         }
+        getDirection() {
+            return this.direction;
+        }
         /**
          * Returns the multiplikation of the worldtransformation of the camera container with the projection matrix
          * @returns the world-projection-matrix
          */
         get ViewProjectionMatrix() {
+            let world = this.pivot;
             try {
-                let cmpTransform = this.getContainer().cmpTransform;
-                let viewMatrix = FudgeCore.Matrix4x4.INVERSION(cmpTransform.local); // TODO: WorldMatrix-> Camera must be calculated
-                return FudgeCore.Matrix4x4.MULTIPLICATION(this.transform, viewMatrix);
+                world = FudgeCore.Matrix4x4.MULTIPLICATION(this.getContainer().mtxWorld, this.pivot);
             }
-            catch {
-                return this.transform;
+            catch (_error) {
+                // no container node or no world transformation found -> continue with pivot only
             }
+            let viewMatrix = FudgeCore.Matrix4x4.INVERSION(world);
+            return FudgeCore.Matrix4x4.MULTIPLICATION(this.transform, viewMatrix);
         }
         /**
          * Set the camera to perspective projection. The world origin is in the center of the canvaselement.
          * @param _aspect The aspect ratio between width and height of projectionspace.(Default = canvas.clientWidth / canvas.ClientHeight)
          * @param _fieldOfView The field of view in Degrees. (Default = 45)
+         * @param _direction The plane on which the fieldOfView-Angle is given
          */
         projectCentral(_aspect = this.aspectRatio, _fieldOfView = this.fieldOfView, _direction = this.direction) {
             this.aspectRatio = _aspect;
@@ -2188,6 +2214,28 @@ var FudgeCore;
             this.projection = PROJECTION.ORTHOGRAPHIC;
             this.transform = FudgeCore.Matrix4x4.PROJECTION_ORTHOGRAPHIC(_left, _right, _bottom, _top, 400, -400); // TODO: examine magic numbers!
         }
+        /**
+         * Return the calculated normed dimension of the projection space
+         */
+        getProjectionRectangle() {
+            let tanFov = Math.tan(Math.PI * this.fieldOfView / 360); // Half of the angle, to calculate dimension from the center -> right angle
+            let tanHorizontal = 0;
+            let tanVertical = 0;
+            if (this.direction == FIELD_OF_VIEW.DIAGONAL) {
+                let aspect = Math.sqrt(this.aspectRatio);
+                tanHorizontal = tanFov * aspect;
+                tanVertical = tanFov / aspect;
+            }
+            else if (this.direction == FIELD_OF_VIEW.VERTICAL) {
+                tanVertical = tanFov;
+                tanHorizontal = tanVertical * this.aspectRatio;
+            }
+            else { //FOV_DIRECTION.HORIZONTAL
+                tanHorizontal = tanFov;
+                tanVertical = tanHorizontal / this.aspectRatio;
+            }
+            return { x: 0, y: 0, width: tanHorizontal * 2, height: tanVertical * 2 };
+        }
         //#region Transfer
         serialize() {
             let serialization = {
@@ -2197,6 +2245,7 @@ var FudgeCore;
                 fieldOfView: this.fieldOfView,
                 direction: this.direction,
                 aspect: this.aspectRatio,
+                pivot: this.pivot.serialize(),
                 [super.constructor.name]: super.serialize()
             };
             return serialization;
@@ -2208,6 +2257,7 @@ var FudgeCore;
             this.fieldOfView = _serialization.fieldOfView;
             this.aspectRatio = _serialization.aspect;
             this.direction = _serialization.direction;
+            this.pivot.deserialize(_serialization.pivot);
             super.deserialize(_serialization[super.constructor.name]);
             switch (this.projection) {
                 case PROJECTION.ORTHOGRAPHIC:
@@ -2381,16 +2431,16 @@ var FudgeCore;
             this.local.deserialize(_serialization.local);
             return this;
         }
-        mutate(_mutator) {
-            this.local.mutate(_mutator);
-        }
-        getMutator() {
-            return this.local.getMutator();
-        }
-        getMutatorAttributeTypes(_mutator) {
-            let types = this.local.getMutatorAttributeTypes(_mutator);
-            return types;
-        }
+        // public mutate(_mutator: Mutator): void {
+        //     this.local.mutate(_mutator);
+        // }
+        // public getMutator(): Mutator { 
+        //     return this.local.getMutator();
+        // }
+        // public getMutatorAttributeTypes(_mutator: Mutator): MutatorAttributeTypes {
+        //     let types: MutatorAttributeTypes = this.local.getMutatorAttributeTypes(_mutator);
+        //     return types;
+        // }
         reduceMutator(_mutator) {
             delete _mutator.world;
             super.reduceMutator(_mutator);
@@ -3103,6 +3153,30 @@ var FudgeCore;
             this.camera.projectCentral(rect.width / rect.height, this.camera.getFieldOfView());
         }
         // #endregion
+        //#region Points
+        pointClientToSource(_client) {
+            let result;
+            let rect;
+            rect = this.getClientRectangle();
+            result = this.frameClientToCanvas.getPoint(_client, rect);
+            rect = this.getCanvasRectangle();
+            result = this.frameCanvasToDestination.getPoint(result, rect);
+            result = this.frameDestinationToSource.getPoint(result, this.rectSource);
+            //TODO: when Source, Render and RenderViewport deviate, continue transformation 
+            return result;
+        }
+        pointSourceToRender(_source) {
+            let projectionRectangle = this.camera.getProjectionRectangle();
+            let point = this.frameSourceToRender.getPoint(_source, projectionRectangle);
+            return point;
+        }
+        pointClientToRender(_client) {
+            let point = this.pointClientToSource(_client);
+            point = this.pointSourceToRender(point);
+            //TODO: when Render and RenderViewport deviate, continue transformation 
+            return point;
+        }
+        //#endregion
         // #region Events (passing from canvas to viewport and from there into branch)
         /**
          * Returns true if this viewport currently has focus and thus receives keyboard events
@@ -3502,17 +3576,11 @@ var FudgeCore;
             this.height = _height;
         }
         getPoint(_pointInFrame, _rectFrame) {
-            let result = {
-                x: this.width * (_pointInFrame.x - _rectFrame.x) / _rectFrame.width,
-                y: this.height * (_pointInFrame.y - _rectFrame.y) / _rectFrame.height
-            };
+            let result = new FudgeCore.Vector2(this.width * (_pointInFrame.x - _rectFrame.x) / _rectFrame.width, this.height * (_pointInFrame.y - _rectFrame.y) / _rectFrame.height);
             return result;
         }
         getPointInverse(_point, _rect) {
-            let result = {
-                x: _point.x * _rect.width / this.width + _rect.x,
-                y: _point.y * _rect.height / this.height + _rect.y
-            };
+            let result = new FudgeCore.Vector2(_point.x * _rect.width / this.width + _rect.x, _point.y * _rect.height / this.height + _rect.y);
             return result;
         }
         getRect(_rectFrame) {
@@ -3535,17 +3603,11 @@ var FudgeCore;
             this.normHeight = _normHeight;
         }
         getPoint(_pointInFrame, _rectFrame) {
-            let result = {
-                x: this.normWidth * (_pointInFrame.x - _rectFrame.x),
-                y: this.normHeight * (_pointInFrame.y - _rectFrame.y)
-            };
+            let result = new FudgeCore.Vector2(this.normWidth * (_pointInFrame.x - _rectFrame.x), this.normHeight * (_pointInFrame.y - _rectFrame.y));
             return result;
         }
         getPointInverse(_point, _rect) {
-            let result = {
-                x: _point.x / this.normWidth + _rect.x,
-                y: _point.y / this.normHeight + _rect.y
-            };
+            let result = new FudgeCore.Vector2(_point.x / this.normWidth + _rect.x, _point.y / this.normHeight + _rect.y);
             return result;
         }
         getRect(_rectFrame) {
@@ -3564,17 +3626,11 @@ var FudgeCore;
             this.padding = { left: 0, top: 0, right: 0, bottom: 0 };
         }
         getPoint(_pointInFrame, _rectFrame) {
-            let result = {
-                x: _pointInFrame.x - this.padding.left - this.margin.left * _rectFrame.width,
-                y: _pointInFrame.y - this.padding.top - this.margin.top * _rectFrame.height
-            };
+            let result = new FudgeCore.Vector2(_pointInFrame.x - this.padding.left - this.margin.left * _rectFrame.width, _pointInFrame.y - this.padding.top - this.margin.top * _rectFrame.height);
             return result;
         }
         getPointInverse(_point, _rect) {
-            let result = {
-                x: _point.x + this.padding.left + this.margin.left * _rect.width,
-                y: _point.y + this.padding.top + this.margin.top * _rect.height
-            };
+            let result = new FudgeCore.Vector2(_point.x + this.padding.left + this.margin.left * _rect.width, _point.y + this.padding.top + this.margin.top * _rect.height);
             return result;
         }
         getRect(_rectFrame) {
@@ -3723,12 +3779,36 @@ var FudgeCore;
                 0, 0, 1, 0,
                 0, 0, 0, 1
             ]);
+            this.resetCache();
         }
         get translation() {
-            return new FudgeCore.Vector3(this.data[12], this.data[13], this.data[14]);
+            if (!this.vectors.translation)
+                this.vectors.translation = new FudgeCore.Vector3(this.data[12], this.data[13], this.data[14]);
+            return this.vectors.translation;
         }
         set translation(_translation) {
             this.data.set(_translation.get(), 12);
+            // no full cache reset required
+            this.vectors.translation = _translation;
+            this.mutator = null;
+        }
+        get rotation() {
+            if (!this.vectors.rotation)
+                this.vectors.rotation = this.getEulerAngles();
+            return this.vectors.rotation;
+        }
+        set rotation(_rotation) {
+            this.mutate({ "rotation": _rotation });
+            this.resetCache();
+        }
+        get scaling() {
+            if (!this.vectors.scaling)
+                this.vectors.scaling = new FudgeCore.Vector3(Math.hypot(this.data[0], this.data[1], this.data[2]), Math.hypot(this.data[4], this.data[5], this.data[6]), Math.hypot(this.data[8], this.data[9], this.data[10]));
+            return this.vectors.scaling;
+        }
+        set scaling(_scaling) {
+            this.mutate({ "scaling": _scaling });
+            this.resetCache();
         }
         //#region STATICS
         static get IDENTITY() {
@@ -3995,7 +4075,8 @@ var FudgeCore;
          * @param _aspect The aspect ratio between width and height of projectionspace.(Default = canvas.clientWidth / canvas.ClientHeight)
          * @param _fieldOfViewInDegrees The field of view in Degrees. (Default = 45)
          * @param _near The near clipspace border on the z-axis.
-         * @param _far The far clipspace borer on the z-axis.
+         * @param _far The far clipspace border on the z-axis.
+         * @param _direction The plane on which the fieldOfView-Angle is given
          */
         static PROJECTION_CENTRAL(_aspect, _fieldOfViewInDegrees, _near, _far, _direction) {
             let fieldOfViewInRadians = _fieldOfViewInDegrees * Math.PI / 180;
@@ -4094,6 +4175,7 @@ var FudgeCore;
          */
         translateX(_x) {
             this.data[12] += _x;
+            this.mutator = null;
         }
         /**
          * Translate the transformation along the y-axis.
@@ -4101,6 +4183,7 @@ var FudgeCore;
          */
         translateY(_y) {
             this.data[13] += _y;
+            this.mutator = null;
         }
         /**
          * Translate the transformation along the z-axis.
@@ -4108,6 +4191,7 @@ var FudgeCore;
          */
         translateZ(_z) {
             this.data[14] += _z;
+            this.mutator = null;
         }
         //#endregion
         //#region Scaling
@@ -4129,14 +4213,12 @@ var FudgeCore;
         //#region Transformation
         multiply(_matrix) {
             this.set(Matrix4x4.MULTIPLICATION(this, _matrix));
+            this.mutator = null;
         }
         //#endregion
         //#region Transfer
-        getVectorRepresentation() {
-            // extract translation vector
-            // let translation: Vector3 = this.translation;  // already defined
-            // extract scaling vector and divide matrix by
-            let scaling = new FudgeCore.Vector3(Math.hypot(this.data[0], this.data[1], this.data[2]), Math.hypot(this.data[4], this.data[5], this.data[6]), Math.hypot(this.data[8], this.data[9], this.data[10]));
+        getEulerAngles() {
+            let scaling = this.scaling;
             let s0 = this.data[0] / scaling.x;
             let s1 = this.data[1] / scaling.x;
             let s2 = this.data[2] / scaling.x;
@@ -4166,12 +4248,12 @@ var FudgeCore;
             }
             let rotation = new FudgeCore.Vector3(x1, y1, z1);
             rotation.scale(180 / Math.PI);
-            return [this.translation, rotation, scaling];
+            return rotation;
         }
         set(_to) {
             // this.data = _to.get();
             this.data.set(_to.data);
-            this.mutator = null;
+            this.resetCache();
         }
         get() {
             return new Float32Array(this.data);
@@ -4188,53 +4270,45 @@ var FudgeCore;
         getMutator() {
             if (this.mutator)
                 return this.mutator;
-            let vectors = this.getVectorRepresentation();
             let mutator = {
-                translation: vectors[0].getMutator(),
-                rotation: vectors[1].getMutator(),
-                scaling: vectors[2].getMutator()
+                translation: this.translation.getMutator(),
+                rotation: this.rotation.getMutator(),
+                scaling: this.scaling.getMutator()
             };
-            // TODO: keep copy as this.mutator. Set this copy to null, when data changes so getMutator creates a new mutator on request
+            // cache mutator
+            this.mutator = mutator;
             return mutator;
         }
         mutate(_mutator) {
-            let mutator = this.getMutator();
-            let oldTranslation = mutator["translation"];
-            let oldRotation = mutator["rotation"];
-            let oldScaling = mutator["scaling"];
+            let oldTranslation = this.translation;
+            let oldRotation = this.rotation;
+            let oldScaling = this.scaling;
             let newTranslation = _mutator["translation"];
             let newRotation = _mutator["rotation"];
             let newScaling = _mutator["scaling"];
+            let vectors = { translation: null, rotation: null, scaling: null };
             if (newTranslation) {
-                mutator["translation"] = {
-                    x: newTranslation.x != undefined ? newTranslation.x : oldTranslation.x,
-                    y: newTranslation.y != undefined ? newTranslation.y : oldTranslation.y,
-                    z: newTranslation.z != undefined ? newTranslation.z : oldTranslation.z
-                };
+                vectors.translation = new FudgeCore.Vector3(newTranslation.x != undefined ? newTranslation.x : oldTranslation.x, newTranslation.y != undefined ? newTranslation.y : oldTranslation.y, newTranslation.z != undefined ? newTranslation.z : oldTranslation.z);
             }
             if (newRotation) {
-                mutator["rotation"] = {
-                    x: newRotation.x != undefined ? newRotation.x : oldRotation.x,
-                    y: newRotation.y != undefined ? newRotation.y : oldRotation.y,
-                    z: newRotation.z != undefined ? newRotation.z : oldRotation.z
-                };
+                vectors.rotation = new FudgeCore.Vector3(newRotation.x != undefined ? newRotation.x : oldRotation.x, newRotation.y != undefined ? newRotation.y : oldRotation.y, newRotation.z != undefined ? newRotation.z : oldRotation.z);
             }
             if (newScaling) {
-                mutator["scaling"] = {
-                    x: newScaling.x != undefined ? newScaling.x : oldScaling.x,
-                    y: newScaling.y != undefined ? newScaling.y : oldScaling.y,
-                    z: newScaling.z != undefined ? newScaling.z : oldScaling.z
-                };
+                vectors.scaling = new FudgeCore.Vector3(newScaling.x != undefined ? newScaling.x : oldScaling.x, newScaling.y != undefined ? newScaling.y : oldScaling.y, newScaling.z != undefined ? newScaling.z : oldScaling.z);
             }
+            // TODO: possible performance optimization when only one or two components change, then use old matrix instead of IDENTITY and transform by differences/quotients
             let matrix = Matrix4x4.IDENTITY;
-            matrix.translate(mutator.translation);
-            // TODO: possible performance optimization when only one or two components change, then use old matrix instead of IDENTITY and transform by differences/Qutionets
-            matrix.rotateZ(mutator.rotation.z);
-            matrix.rotateY(mutator.rotation.y);
-            matrix.rotateX(mutator.rotation.x);
-            matrix.scale(mutator.scaling);
+            if (vectors.translation)
+                matrix.translate(vectors.translation);
+            if (vectors.rotation) {
+                matrix.rotateZ(vectors.rotation.z);
+                matrix.rotateY(vectors.rotation.y);
+                matrix.rotateX(vectors.rotation.x);
+            }
+            if (vectors.scaling)
+                matrix.scale(vectors.scaling);
             this.set(matrix);
-            this.mutator = mutator;
+            this.vectors = vectors;
         }
         getMutatorAttributeTypes(_mutator) {
             let types = {};
@@ -4247,6 +4321,10 @@ var FudgeCore;
             return types;
         }
         reduceMutator(_mutator) { }
+        resetCache() {
+            this.vectors = { translation: null, rotation: null, scaling: null };
+            this.mutator = null;
+        }
     }
     FudgeCore.Matrix4x4 = Matrix4x4;
     //#endregion
@@ -4261,8 +4339,9 @@ var FudgeCore;
      * ```
      * @authors Lukas Scheuerle, HFU, 2019
      */
-    class Vector2 {
+    class Vector2 extends FudgeCore.Mutable {
         constructor(_x = 0, _y = 0) {
+            super();
             this.data = new Float32Array([_x, _y]);
         }
         get x() {
@@ -4477,11 +4556,18 @@ var FudgeCore;
             return new Float32Array(this.data);
         }
         /**
-         * @returns An deep copy of the vector.
+         * @returns A deep copy of the vector.
          */
         get copy() {
             return new Vector2(this.x, this.y);
         }
+        getMutator() {
+            let mutator = {
+                x: this.data[0], y: this.data[1]
+            };
+            return mutator;
+        }
+        reduceMutator(_mutator) { }
     }
     FudgeCore.Vector2 = Vector2;
 })(FudgeCore || (FudgeCore = {}));
@@ -4545,9 +4631,9 @@ var FudgeCore;
             let result = new Vector3();
             let m = _matrix.get();
             let [x, y, z] = _vector.get();
-            result.x = m[0] * x + m[4] * y + m[8] * z; // + m[12];
-            result.y = m[1] * x + m[5] * y + m[9] * z; // + m[13];
-            result.z = m[2] * x + m[6] * y + m[10] * z; // + m[14];
+            result.x = m[0] * x + m[4] * y + m[8] * z + m[12];
+            result.y = m[1] * x + m[5] * y + m[9] * z + m[13];
+            result.z = m[2] * x + m[6] * y + m[10] * z + m[14];
             return result;
         }
         static NORMALIZATION(_vector, _length = 1) {
@@ -5353,6 +5439,17 @@ var FudgeCore;
         }
     }
     FudgeCore.NodeResourceInstance = NodeResourceInstance;
+})(FudgeCore || (FudgeCore = {}));
+var FudgeCore;
+(function (FudgeCore) {
+    class Ray {
+        constructor(_direction = FudgeCore.Vector3.Z(-1), _origin = FudgeCore.Vector3.ZERO(), _length = 1) {
+            this.origin = _origin;
+            this.direction = _direction;
+            this.length = _length;
+        }
+    }
+    FudgeCore.Ray = Ray;
 })(FudgeCore || (FudgeCore = {}));
 /// <reference path="RenderOperator.ts"/>
 var FudgeCore;

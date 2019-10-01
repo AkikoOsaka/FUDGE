@@ -33,6 +33,10 @@ var Fudge;
             ƒ.Debug.log("OpenViewNode");
             openViewNode();
         });
+        ipcRenderer.on("openAnimationPanel", (_event, _args) => {
+            ƒ.Debug.log("Open Animation Panel");
+            openAnimationPanel();
+        });
         // HACK!
         ipcRenderer.on("updateNode", (_event, _args) => {
             ƒ.Debug.log("UpdateViewNode");
@@ -42,6 +46,10 @@ var Fudge;
         node = Scenes.createAxisCross();
         panel = Fudge.PanelManager.instance.createPanelFromTemplate(new Fudge.NodePanelTemplate, "Node Panel");
         panel.setNode(node);
+        Fudge.PanelManager.instance.addPanel(panel);
+    }
+    function openAnimationPanel() {
+        let panel = Fudge.PanelManager.instance.createPanelFromTemplate(new Fudge.ViewAnimationTemplate(), "Animation Panel");
         Fudge.PanelManager.instance.addPanel(panel);
     }
     function save(_node) {
@@ -156,6 +164,9 @@ var Fudge;
                                 if (this.node) {
                                     // (<ViewViewport>view).setRoot(this.node);
                                 }
+                                break;
+                            case Fudge.VIEW.ANIMATION:
+                                view = new Fudge.ViewAnimation(this);
                                 break;
                         }
                         let viewConfig = {
@@ -336,7 +347,7 @@ var Fudge;
     (function (VIEW) {
         // PROJECT = ViewProject,
         VIEW["NODE"] = "ViewNode";
-        // ANIMATION = ViewAnimation,
+        VIEW["ANIMATION"] = "ViewAnimation";
         // SKETCH = ViewSketch,
         // MESH = ViewMesh,
         VIEW["PORT"] = "ViewPort";
@@ -410,6 +421,7 @@ var Fudge;
                 let lblNodeName = document.createElement("label");
                 lblNodeName.textContent = "Name";
                 cntHeader.append(lblNodeName);
+                this.content.append(cntHeader);
                 let txtNodeName = document.createElement("input");
                 txtNodeName.value = this.node.name;
                 cntHeader.append(txtNodeName);
@@ -418,11 +430,9 @@ var Fudge;
                 console.group("Components of the node");
                 console.log(nodeComponents);
                 for (let nodeComponent of nodeComponents) {
-                    console.log(nodeComponent.getMutator());
                     let uiComponents = new ƒui.UINodeData(nodeComponent, this.content);
                 }
                 console.groupEnd();
-                this.content.append(cntHeader);
             }
             else {
                 let cntEmpty = document.createElement("div");
